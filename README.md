@@ -73,9 +73,9 @@ Simple, fast, and robust — avoids complex schedules while steering average spa
 ## Process (Repro Steps)
 
 1. **Install deps** (in the notebook):
-   ```bash
+   
    pip install "pytorch-lightning<3" "torch>=2.2,<3" torchvision torchaudio matplotlib tqdm
-````
+
 
 2. **Train FFN** to get baseline accuracy.
 3. **Collect logits** (train/val/test) and optionally standardize.
@@ -83,8 +83,8 @@ Simple, fast, and robust — avoids complex schedules while steering average spa
 5. **Train final SAE** at the chosen λ and evaluate fidelity on test.
 6. **Artifacts:**
 
-   * `artifacts_mnist_sae_logits/summary.json`
-   * `artifacts_mnist_sae_logits/BEST_RESULTS.md`
+   * artifacts_mnist_sae_logits/summary.json
+   * artifacts_mnist_sae_logits/BEST_RESULTS.md
 
   
 
