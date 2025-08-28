@@ -1,4 +1,4 @@
-````markdown
+
 # MNIST FFN + Sparse Autoencoder (SAE)
 
 **TL;DR**  
