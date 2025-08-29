@@ -545,7 +545,7 @@ te_mse_raw = mse_over_loader(sae_final, test_loader,  mu=mu_bo, std=std_bo, comp
 print(f"[Recon MSE — normalized space] train={tr_mse_norm:.6f} | val={va_mse_norm:.6f} | test={te_mse_norm:.6f}")
 print(f"[Recon MSE — raw space]        train={tr_mse_raw:.6f}  | val={va_mse_raw:.6f}  | test={te_mse_raw:.6f}")
 
-# Cell 14 — Optional: per-example MSE distribution and best/worst examples (on validation set)
+# Cell 14-per-example MSE distribution and best/worst examples (on validation set)
 
 import torch
 
@@ -577,3 +577,54 @@ worst_idx = int(torch.argmax(val_per_ex_mse))
 print(f"[Val per-example MSE — normalized] mean={val_avg:.6f} | median={val_med:.6f} | p95={val_p95:.6f}")
 print(f"Best example idx={best_idx} mse={val_per_ex_mse[best_idx].item():.6f}")
 print(f"Worst example idx={worst_idx} mse={val_per_ex_mse[worst_idx].item():.6f}")
+# Cell 15 — CE/accuracy helpers that work with your loaders and model
+
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def ce_and_acc_over_img_loader(model, loader, device=None):
+    dev = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+    model.eval().to(dev)
+    ce_sum, correct, seen = 0.0, 0, 0
+    for x_bchw, y_gt in loader:
+        x_bchw = x_bchw.to(dev)
+        y_gt   = y_gt.to(dev).long()
+        logits = model(x_bchw)                # baseline logits
+        ce_sum += F.cross_entropy(logits, y_gt, reduction="sum").item()
+        correct += (logits.argmax(dim=1) == y_gt).sum().item()
+        seen += y_gt.numel()
+    return ce_sum / max(seen, 1), correct / max(seen, 1)
+
+@torch.no_grad()
+def ce_and_acc_over_img_loader_with_sae(model, loader, sae, mu_bo, std_bo, device=None):
+    dev = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+    model.eval().to(dev); sae.eval().to(dev)
+    ce_sum, correct, seen = 0.0, 0, 0
+    for x_bchw, y_gt in loader:
+        x_bchw = x_bchw.to(dev)
+        y_gt   = y_gt.to(dev).long()
+        # your pipeline: x -> MLP.ffn logits -> SAE -> recon logits
+        x_bi      = x_bchw.view(x_bchw.size(0), -1)
+        y_raw_bO  = model.ffn(x_bi)
+        y_hat_bO  = sae_forward_logits(sae, y_raw_bO, mu_bo, std_bo)  # already returns RAW-space recon logits
+        ce_sum   += F.cross_entropy(y_hat_bO, y_gt, reduction="sum").item()
+        correct  += (y_hat_bO.argmax(dim=1) == y_gt).sum().item()
+        seen     += y_gt.numel()
+    return ce_sum / max(seen, 1), correct / max(seen, 1)
+# Cell 16 — Compute CE/Acc for baseline vs SAE on all splits
+
+# Baseline (no SAE)
+tr_ce_base, tr_acc_base = ce_and_acc_over_img_loader(model, dl_train, device=device)
+va_ce_base, va_acc_base = ce_and_acc_over_img_loader(model, dl_val,   device=device)
+te_ce_base, te_acc_base = ce_and_acc_over_img_loader(model, dl_test,  device=device)
+
+# With SAE-reconstructed logits
+tr_ce_sae, tr_acc_sae = ce_and_acc_over_img_loader_with_sae(model, dl_train, sae_final, mu_bo, std_bo, device=device)
+va_ce_sae, va_acc_sae = ce_and_acc_over_img_loader_with_sae(model, dl_val,   sae_final, mu_bo, std_bo, device=device)
+te_ce_sae, te_acc_sae = ce_and_acc_over_img_loader_with_sae(model, dl_test,  sae_final, mu_bo, std_bo, device=device)
+
+print("=== Cross-Entropy (↓) / Accuracy (↑) ===")
+print(f"TRAIN | CE base {tr_ce_base:.4f} | CE SAE {tr_ce_sae:.4f} | ΔCE {tr_ce_sae - tr_ce_base:+.4f} | Acc base {tr_acc_base:.4f} | Acc SAE {tr_acc_sae:.4f} | ΔAcc {tr_acc_sae - tr_acc_base:+.4f}")
+print(f"VAL   | CE base {va_ce_base:.4f} | CE SAE {va_ce_sae:.4f} | ΔCE {va_ce_sae - va_ce_base:+.4f} | Acc base {va_acc_base:.4f} | Acc SAE {va_acc_sae:.4f} | ΔAcc {va_acc_sae - va_acc_base:+.4f}")
+print(f"TEST  | CE base {te_ce_base:.4f} | CE SAE {te_ce_sae:.4f} | ΔCE {te_ce_sae - te_ce_base:+.4f} | Acc base {te_acc_base:.4f} | Acc SAE {te_acc_sae:.4f} | ΔAcc {te_acc_sae - te_acc_base:+.4f}")
