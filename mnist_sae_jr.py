@@ -430,3 +430,150 @@ if os.path.exists(best_path):
         print(f.read())
 else:
     print("Run Cell 9 first to generate BEST_RESULTS.md")
+
+# Cell 12 — Consistent reconstruction-MSE evaluators (normalized vs unnormalized)
+
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def sae_forward_recon(sae, z_raw, mu=None, std=None, mode="jumprelu"):
+    """
+    Returns:
+      z_hat_norm  : reconstruction in the *normalized* SAE space
+      z_recon_raw : reconstruction mapped back to *raw* (unnormalized) space (if mu/std given)
+    """
+    dev = next(sae.parameters()).device
+    z_raw = z_raw.to(dev)
+
+    # normalize to the space used during SAE training
+    if (isinstance(mu, torch.Tensor) and isinstance(std, torch.Tensor)):
+        mu_t  = mu.to(dev)
+        std_t = std.to(dev)
+        z = (z_raw - mu_t) / (std_t + 1e-8)
+    else:
+        mu_t = std_t = None
+        z = z_raw
+
+    u = sae.enc(z)
+
+    # --- SAFE theta retrieval (no tensor truthiness) ---
+    theta = None
+    if hasattr(sae, "theta_h"):
+        theta = getattr(sae, "theta_h")
+    elif hasattr(sae, "theta"):
+        theta = getattr(sae, "theta")
+    if isinstance(theta, torch.nn.Parameter):
+        theta = theta.data
+    if theta is None:
+        theta = torch.tensor(0.0, device=dev, dtype=u.dtype)
+    else:
+        theta = theta.to(device=dev, dtype=u.dtype)
+    # ---------------------------------------------------
+
+    if mode == "jumprelu":
+        b = (u > theta).to(u.dtype)
+        f = u * b
+    elif mode == "boolean":
+        f = (u > theta).to(u.dtype)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    z_hat_norm = sae.dec(f)  # normalized space
+
+    if (mu_t is not None) and (std_t is not None):
+        z_recon_raw = z_hat_norm * (std_t + 1e-8) + mu_t
+    else:
+        z_recon_raw = z_hat_norm
+
+    return z_hat_norm, z_recon_raw
+
+
+@torch.no_grad()
+def mse_over_loader(sae, loader, mu=None, std=None, mode="jumprelu", compare_space="normalized"):
+    """
+    compare_space: "normalized"  -> MSE between z_hat_norm and z_norm   (matches SAE training logs)
+                   "raw"         -> MSE between z_recon_raw and z_raw   (user-facing, intuitive)
+    Returns scalar mean MSE over all examples and dimensions.
+    """
+    sae.eval()
+    dev = next(sae.parameters()).device
+    total_sqerr, total_count = 0.0, 0
+
+    for batch in loader:
+        # accept (tensor,) or tensor
+        z_raw = batch[0] if isinstance(batch, (list, tuple)) else batch
+        z_raw = z_raw.to(dev)
+
+        # forward
+        z_hat_norm, z_recon_raw = sae_forward_recon(sae, z_raw, mu=mu, std=std, mode=mode)
+
+        if compare_space == "normalized":
+            if (isinstance(mu, torch.Tensor) and isinstance(std, torch.Tensor)):
+                z_norm = (z_raw - mu.to(dev)) / (std.to(dev) + 1e-8)
+            else:
+                z_norm = z_raw
+            diff = z_hat_norm - z_norm
+        elif compare_space == "raw":
+            diff = z_recon_raw - z_raw
+        else:
+            raise ValueError("compare_space must be 'normalized' or 'raw'")
+
+        total_sqerr += diff.pow(2).sum().item()
+        total_count += diff.numel()
+
+    return total_sqerr / max(total_count, 1)
+
+# Cell 13 — Compute train/val/test MSE in normalized space (matches training logs) and raw space
+
+# Reuse your existing hidden-activation tensors & loaders (the same reps you trained the SAE on):
+# Assuming you already have Ytr_bo, Yva_bo, Yte_bo and mu_bo, std_bo, sae_final
+train_loader = tloader(Ytr_bo, bs=256, shuffle=False)
+val_loader   = tloader(Yva_bo, bs=256, shuffle=False)
+test_loader  = tloader(Yte_bo, bs=256, shuffle=False)
+
+# 1) Normalized-space MSE (should be close to Lightning's train/val recon_mse ~ 0.2)
+tr_mse_norm = mse_over_loader(sae_final, train_loader, mu=mu_bo, std=std_bo, compare_space="normalized")
+va_mse_norm = mse_over_loader(sae_final, val_loader,   mu=mu_bo, std=std_bo, compare_space="normalized")
+te_mse_norm = mse_over_loader(sae_final, test_loader,  mu=mu_bo, std=std_bo, compare_space="normalized")
+
+# 2) Raw-space MSE (often larger because it includes the original scale)
+tr_mse_raw = mse_over_loader(sae_final, train_loader, mu=mu_bo, std=std_bo, compare_space="raw")
+va_mse_raw = mse_over_loader(sae_final, val_loader,   mu=mu_bo, std=std_bo, compare_space="raw")
+te_mse_raw = mse_over_loader(sae_final, test_loader,  mu=mu_bo, std=std_bo, compare_space="raw")
+
+print(f"[Recon MSE — normalized space] train={tr_mse_norm:.6f} | val={va_mse_norm:.6f} | test={te_mse_norm:.6f}")
+print(f"[Recon MSE — raw space]        train={tr_mse_raw:.6f}  | val={va_mse_raw:.6f}  | test={te_mse_raw:.6f}")
+
+# Cell 14 — Optional: per-example MSE distribution and best/worst examples (on validation set)
+
+import torch
+
+@torch.no_grad()
+def per_example_mse(sae, Z_raw, mu=None, std=None, mode="jumprelu", compare_space="normalized", batch_size=512):
+    dev = next(sae.parameters()).device
+    sae.eval()
+    N = Z_raw.shape[0]
+    out = torch.empty(N, device="cpu")
+    for i in range(0, N, batch_size):
+        z_batch = Z_raw[i:i+batch_size].to(dev)
+        z_hat_norm, z_recon_raw = sae_forward_recon(sae, z_batch, mu=mu, std=std, mode=mode)
+        if compare_space == "normalized":
+            z_norm = (z_batch - mu.to(dev)) / (std.to(dev) + 1e-8) if (isinstance(mu, torch.Tensor) and isinstance(std, torch.Tensor)) else z_batch
+            diff = z_hat_norm - z_norm
+        else:
+            diff = z_recon_raw - z_batch
+        out[i:i+batch_size] = diff.pow(2).mean(dim=1).detach().cpu()
+    return out  # (N,)
+
+# Compute per-example val MSE in normalized space
+val_per_ex_mse = per_example_mse(sae_final, Yva_bo, mu=mu_bo, std=std_bo, compare_space="normalized")
+val_avg = val_per_ex_mse.mean().item()
+val_med = val_per_ex_mse.median().item()
+val_p95 = val_per_ex_mse.quantile(0.95).item()
+best_idx = int(torch.argmin(val_per_ex_mse))
+worst_idx = int(torch.argmax(val_per_ex_mse))
+
+print(f"[Val per-example MSE — normalized] mean={val_avg:.6f} | median={val_med:.6f} | p95={val_p95:.6f}")
+print(f"Best example idx={best_idx} mse={val_per_ex_mse[best_idx].item():.6f}")
+print(f"Worst example idx={worst_idx} mse={val_per_ex_mse[worst_idx].item():.6f}")
