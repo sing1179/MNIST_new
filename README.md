@@ -5,6 +5,7 @@
 We train a small MNIST classifier (FFN), then fit a **JumpReLU** sparse autoencoder on the **classifier’s logits**.  
 Target sparsity is **~1 active latent per example** (MNIST has 10 classes).  
 Fidelity is measured as test accuracy when replacing model logits with SAE-reconstructed logits.  
+Best run: target_actives=1 → achieved=1.63 actives/example; Δ accuracy = 5.62 pp (97.21% → 91.59%); Val recon MSE = 0.1743 (normalized space) / 8.4039 (raw space).
 The notebook writes **`artifacts_mnist_sae_logits/BEST_RESULTS.md`** with the best run.
 
 ---
@@ -67,6 +68,7 @@ Simple, fast, and robust — avoids complex schedules while steering average spa
 - Replace logits with **SAE-reconstructed logits** and recompute test accuracy.
 - Report **Δ accuracy** = baseline − reconstructed.  
   Δ≈0 while L0≈1 → sparse **and** faithful code.
+**Reconstruction error (MSE).** We report mean squared error between targets and reconstructions (averaged over all examples and dimensions) in two spaces: (1) the **normalized SAE space** used for training (primary metric), and (2) the **raw (unnormalized) logit space** for intuition. The primary number we report in the paper-style write-up is the **validation MSE in the normalized space**.
 
 ---
 
@@ -118,16 +120,34 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 - normalize_logits: True
 - batch_sizes: FFN=8, SAE=8
 ```
+### Reconstruction Error
+
+**Mean squared error (averaged over all examples and dimensions):**
+
+| Split | MSE (normalized space) | MSE (raw space) |
+|---|---:|---:|
+| Train | 0.173436 | 8.324016 |
+| Val   | **0.174266** | **8.403860** |
+| Test  | 0.173423 | 8.330576 |
+
+**Per-example Val MSE (normalized space):** mean `0.174266`, median `0.155517`, p95 `0.369527`; best idx `4913` → `0.006609`; worst idx `338` → `1.099880`.
+
+> Note: Normalized-space MSE (~0.174) matches the SAE training objective and PL logs. Higher raw-space MSE (~8.40) reflects the variance scale of original logits.
 
 **Interpretation:**
 
 * Achieved actives **1.63 > 1.0** indicates the solution is a bit **too dense** for the target.
 * Accuracy drop **Δ ≈ 0.056** suggests the reconstruction can be improved.
+* **Normalized vs raw space:** We treat normalized-space Val MSE (0.1743) as the primary metric; raw-space Val MSE (8.404) is provided for intuition about the original logit scale.
+* **Heavy-tailed errors:** Per-example Val MSE is skewed (median < mean; p95 ≈ 2× mean), suggesting a small subset of hard examples dominates the error.
+
 
 **Quick improvements (optional next steps):**
 
-* Increase λ moderately (e.g., **0.2–0.5**) and retrain SAE once; re-check L0 and Δ.
-* Or apply a **global θ shift** post-training to snap mean actives to **exactly 1.0** and re-measure Δ.
+* Nudge **λ** upward from `0.09` to **`0.12–0.18`** to target ~**1.3–1.5** actives/ex and re-check Δ accuracy.
+* Apply a **global θ shift** or per-feature θ calibration (EMA/percentile) to reduce worst-case (p95) errors.
+* Try **SAE_LATENTS ∈ {64, 96, 128}** while keeping actives ≲1.5 to test if Δ shrinks at similar sparsity.
+
 
 ---
 
@@ -135,7 +155,8 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 
 * It’s feasible to obtain **\~1 active latent per example** on MNIST **logits** with **small accuracy loss**; careful λ/θ tuning can further reduce Δ.
 * Training the SAE on **post-MLP logits** (not first-layer pre-acts) concentrates capacity on the decision signal — consistent with interpretability goals.
-* A **simple λ sweep** is sufficient to steer average sparsity in this setting.
+* A **simple λ sweep** is sufficient to steer average sparsity in this setting.Validation reconstruction error is **0.1743** in the normalized SAE space (raw ≈ **8.404**), with train/val/test tightly clustered, indicating stable generalization of the learned dictionary.
+
 
 
 
