@@ -6,6 +6,7 @@ We train a small MNIST classifier (FFN), then fit a **JumpReLU** sparse autoenco
 Target sparsity is **~1 active latent per example** (MNIST has 10 classes).  
 Fidelity is measured as test accuracy when replacing model logits with SAE-reconstructed logits.  
 Best run: target_actives=1 → achieved=1.63 actives/example; Δ accuracy = 5.62 pp (97.21% → 91.59%); Val recon MSE = 0.1743 (normalized space) / 8.4039 (raw space).
+Validation classifier loss (CE): baseline 0.1061 → SAE-reconstructed 0.3659 (ΔCE +0.2598).
 The notebook writes **`artifacts_mnist_sae_logits/BEST_RESULTS.md`** with the best run.
 
 ---
@@ -69,6 +70,7 @@ Simple, fast, and robust — avoids complex schedules while steering average spa
 - Report **Δ accuracy** = baseline − reconstructed.  
   Δ≈0 while L0≈1 → sparse **and** faithful code.
 **Reconstruction error (MSE).** We report mean squared error between targets and reconstructions (averaged over all examples and dimensions) in two spaces: (1) the **normalized SAE space** used for training (primary metric), and (2) the **raw (unnormalized) logit space** for intuition. The primary number we report in the paper-style write-up is the **validation MSE in the normalized space**.
+  **Classifier loss (CE).** We also report cross-entropy from (i) the baseline MLP logits and (ii) SAE-reconstructed logits, alongside accuracy deltas on train/val/test.
 
 ---
 
@@ -133,6 +135,13 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 **Per-example Val MSE (normalized space):** mean `0.174266`, median `0.155517`, p95 `0.369527`; best idx `4913` → `0.006609`; worst idx `338` → `1.099880`.
 
 > Note: Normalized-space MSE (~0.174) matches the SAE training objective and PL logs. Higher raw-space MSE (~8.40) reflects the variance scale of original logits.
+### Classifier Loss & Accuracy
+
+| Split | CE (baseline) | CE (SAE recon) | ΔCE | Acc (baseline) | Acc (SAE recon) | ΔAcc |
+|---|---:|---:|---:|---:|---:|---:|
+| Train | 0.0551 | 0.3193 | +0.2643 | 0.9824 | 0.9140 | −0.0684 |
+| Val   | 0.1061 | 0.3659 | +0.2598 | 0.9669 | 0.9055 | −0.0614 |
+| Test  | 0.0933 | 0.3456 | +0.2523 | 0.9721 | 0.9159 | −0.0562 |
 
 **Interpretation:**
 
@@ -140,7 +149,8 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 * Accuracy drop **Δ ≈ 0.056** suggests the reconstruction can be improved.
 * **Normalized vs raw space:** We treat normalized-space Val MSE (0.1743) as the primary metric; raw-space Val MSE (8.404) is provided for intuition about the original logit scale.
 * **Heavy-tailed errors:** Per-example Val MSE is skewed (median < mean; p95 ≈ 2× mean), suggesting a small subset of hard examples dominates the error.
-
+* **CE tracks accuracy deltas:** Val ΔCE **+0.2598** aligns with ΔAcc **−0.0614**, indicating the SAE drops some decision-relevant detail even while keeping logits broadly faithful.
+* **Where to improve:** Reducing actives toward ~1.3–1.5 (by slightly increasing λ) and calibrating θ per-feature often lowers ΔCE/ΔAcc without collapsing sparsity.
 
 **Quick improvements (optional next steps):**
 
@@ -156,6 +166,7 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 * It’s feasible to obtain **\~1 active latent per example** on MNIST **logits** with **small accuracy loss**; careful λ/θ tuning can further reduce Δ.
 * Training the SAE on **post-MLP logits** (not first-layer pre-acts) concentrates capacity on the decision signal — consistent with interpretability goals.
 * A **simple λ sweep** is sufficient to steer average sparsity in this setting.Validation reconstruction error is **0.1743** in the normalized SAE space (raw ≈ **8.404**), with train/val/test tightly clustered, indicating stable generalization of the learned dictionary.
+Validation CE rises from **0.1061** (baseline logits) to **0.3659** (SAE recon), consistent with the observed accuracy drop and leaving room for λ/θ tuning to recover fidelity.
 
 
 
