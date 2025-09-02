@@ -617,3 +617,102 @@ print("=== Cross-Entropy (↓) / Accuracy (↑) ===")
 print(f"TRAIN | CE base {tr_ce_base:.4f} | CE SAE {tr_ce_sae:.4f} | ΔCE {tr_ce_sae - tr_ce_base:+.4f} | Acc base {tr_acc_base:.4f} | Acc SAE {tr_acc_sae:.4f} | ΔAcc {tr_acc_sae - tr_acc_base:+.4f}")
 print(f"VAL   | CE base {va_ce_base:.4f} | CE SAE {va_ce_sae:.4f} | ΔCE {va_ce_sae - va_ce_base:+.4f} | Acc base {va_acc_base:.4f} | Acc SAE {va_acc_sae:.4f} | ΔAcc {va_acc_sae - va_acc_base:+.4f}")
 print(f"TEST  | CE base {te_ce_base:.4f} | CE SAE {te_ce_sae:.4f} | ΔCE {te_ce_sae - te_ce_base:+.4f} | Acc base {te_acc_base:.4f} | Acc SAE {te_acc_sae:.4f} | ΔAcc {te_acc_sae - te_acc_base:+.4f}")
+# Cell 17 — MLP sweep: configs + train/eval helper
+
+from copy import deepcopy
+import itertools, json, os
+from pathlib import Path
+
+SWEEP_HIDDEN = [1024, 8192]
+SWEEP_LR     = [1e-1, 1e-2, 1e-3, 1e-4]
+SWEEP_EPOCHS = EPOCHS_FFN            # keep same epochs; bump if you want even lower CE
+
+assert BATCH_FFN == 8, f"BATCH_FFN is {BATCH_FFN}, mentor requested bs=8. Recreate loaders with batch_size=8."
+# (Recreate anyway to be safe)
+dl_train, dl_val, dl_test = load_mnist(batch_size=8)
+
+SWEEP_DIR = Path(OUT_DIR) / "ffn_sweep"
+SWEEP_DIR.mkdir(parents=True, exist_ok=True)
+
+@torch.no_grad()
+def _acc_over_loader(model, loader, device=None):
+    dev = device or next(model.parameters()).device
+    model.eval().to(dev)
+    correct=total=0
+    for x_bchw, y_gt in loader:
+        y_bo = model(x_bchw.to(dev))
+        pred = y_bo.argmax(dim=1)
+        correct += (pred == y_gt.to(dev)).sum().item()
+        total   += y_gt.numel()
+    return correct / max(total,1)
+
+def train_eval_ffn(d_h, lr, epochs=SWEEP_EPOCHS, ffn_type=FFN_TYPE):
+    # fresh model for each run
+    m = MNIST_FFN(ffn_type, d_h=d_h, lr=lr)
+    tr = _trainer(epochs)
+    tr.fit(m, dl_train, dl_val)
+
+    # CE/Acc on splits
+    tr_ce, tr_acc = ce_and_acc_over_img_loader(m, dl_train, device=device)
+    va_ce, va_acc = ce_and_acc_over_img_loader(m, dl_val,   device=device)
+    te_ce, te_acc = ce_and_acc_over_img_loader(m, dl_test,  device=device)
+
+    # also baseline test acc via your original helper (just for parity)
+    te_acc2 = _acc_over_loader(m, dl_test, device=device)
+
+    return {
+        "hidden_dim": d_h,
+        "lr": lr,
+        "epochs": epochs,
+        "train_ce": tr_ce, "train_acc": tr_acc,
+        "val_ce": va_ce,   "val_acc": va_acc,
+        "test_ce": te_ce,  "test_acc": te_acc,
+        "test_acc_alt": te_acc2,
+        "ffn_type": ffn_type,
+    }, m
+# Cell 18 — Execute sweep and pick best by lowest validation CE
+
+def _lr_tag(x):  # safe filename tag for LRs
+    s = f"{x:.0e}".replace("+", "").replace("-", "m")
+    return s
+
+sweep_results = []
+best = None
+best_model = None
+
+print("=== MLP Sweep (bs=8) ===")
+for d_h, lr in itertools.product(SWEEP_HIDDEN, SWEEP_LR):
+    tag = f"d{d_h}_lr{_lr_tag(lr)}"
+    print(f"\n-> Training MLP: hidden={d_h}, lr={lr} ({tag})")
+    res, m = train_eval_ffn(d_h, lr)
+
+    # save checkpoint & metrics
+    ckpt_path = SWEEP_DIR / f"ffn_{tag}.pt"
+    torch.save(m.state_dict(), ckpt_path)
+    res["ckpt"] = str(ckpt_path)
+    sweep_results.append(res)
+
+    # print row
+    print(f"   Train CE {res['train_ce']:.4f} | Val CE {res['val_ce']:.4f} | Test CE {res['test_ce']:.4f}")
+    print(f"   Train Acc {res['train_acc']:.4f} | Val Acc {res['val_acc']:.4f} | Test Acc {res['test_acc']:.4f}")
+
+    # track best by lowest val CE
+    if (best is None) or (res["val_ce"] < best["val_ce"]):
+        best = deepcopy(res)
+        best_model = deepcopy(m)  # keep in-memory copy of best
+
+# Save summary
+sum_path = SWEEP_DIR / "summary_ffn_sweep.json"
+with open(sum_path, "w") as f:
+    json.dump(sweep_results, f, indent=2)
+
+print("\n=== Sweep complete ===")
+print(f"Saved summary: {sum_path}")
+print("Top-3 by Val CE:")
+top3 = sorted(sweep_results, key=lambda r: r["val_ce"])[:3]
+for i, r in enumerate(top3, 1):
+    print(f"{i}) d={r['hidden_dim']:<5} lr={r['lr']:<8} | Val CE={r['val_ce']:.4f} | Val Acc={r['val_acc']:.4f} | ckpt={Path(r['ckpt']).name}")
+
+print("\nBest (Val CE):")
+print(best)
+best_ckpt = best["ckpt"]
