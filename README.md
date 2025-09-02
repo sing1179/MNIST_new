@@ -6,6 +6,7 @@ We train a small MNIST classifier (FFN), then fit a **JumpReLU** sparse autoenco
 Target sparsity is **~1 active latent per example** (MNIST has 10 classes).  
 Fidelity is measured as test accuracy when replacing model logits with SAE-reconstructed logits.  
 Best run: target_actives=1 → achieved=1.63 actives/example; Δ accuracy = 5.62 pp (97.21% → 91.59%); Val recon MSE = 0.1743 (normalized space) / 8.4039 (raw space).
+With bs=8, an MLP sweep over hidden∈{1024, 8192} and LR∈{1e-1,1e-2,1e-3,1e-4} found a best baseline at **hidden=8192, lr=1e-4**: **Val CE 0.0809**, **Test CE 0.0738**, **Test Acc 0.9759**.
 Validation classifier loss (CE): baseline 0.1061 → SAE-reconstructed 0.3659 (ΔCE +0.2598).
 The notebook writes **`artifacts_mnist_sae_logits/BEST_RESULTS.md`** with the best run.
 
@@ -41,6 +42,8 @@ The notebook writes **`artifacts_mnist_sae_logits/BEST_RESULTS.md`** with the be
 
 **Why this FFN?**  
 Small and stable; the goal is to analyze and sparsify **logits**, not to chase SOTA.
+
+**Sweep for low CE (bs=8).** We additionally train 8 MLPs with hidden ∈ {1024, 8192} and LR ∈ {1e-1, 1e-2, 1e-3, 1e-4}. We select the best by **lowest validation cross-entropy**. The best setting was **8192 hidden, lr=1e-4**.
 
 ### Sparse Autoencoder (JumpReLU) on Logits
 - **Input/target:** Logits `y_bo` (dimension `10`).
@@ -135,6 +138,19 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 **Per-example Val MSE (normalized space):** mean `0.174266`, median `0.155517`, p95 `0.369527`; best idx `4913` → `0.006609`; worst idx `338` → `1.099880`.
 
 > Note: Normalized-space MSE (~0.174) matches the SAE training objective and PL logs. Higher raw-space MSE (~8.40) reflects the variance scale of original logits.
+### MLP Sweep (bs=8)
+
+We trained 8 MLPs with hidden ∈ {1024, 8192} and LR ∈ {1e-1, 1e-2, 1e-3, 1e-4}, selecting by **lowest Val CE**.
+
+**Top-3 (by Val CE):**
+| Rank | Hidden | LR   | Val CE | Val Acc | Test CE | Test Acc | Checkpoint |
+|-----:|------:|:----:|-------:|--------:|--------:|---------:|:-----------|
+| 1 | 8192 | 1e-4 | **0.0809** | 0.9756 | **0.0738** | **0.9759** | `ffn_d8192_lr1em04.pt` |
+| 2 | 1024 | 1e-3 | 0.1054 | 0.9709 | — | — | `ffn_d1024_lr1em03.pt` |
+| 3 | 1024 | 1e-4 | 0.1218 | 0.9653 | — | — | `ffn_d1024_lr1em04.pt` |
+
+Full sweep results: `artifacts_mnist_sae_logits/ffn_sweep/summary_ffn_sweep.json`.
+
 ### Classifier Loss & Accuracy
 
 | Split | CE (baseline) | CE (SAE recon) | ΔCE | Acc (baseline) | Acc (SAE recon) | ΔAcc |
@@ -166,6 +182,7 @@ After running the notebook, `BEST_RESULTS.md` contains the best run.
 * It’s feasible to obtain **\~1 active latent per example** on MNIST **logits** with **small accuracy loss**; careful λ/θ tuning can further reduce Δ.
 * Training the SAE on **post-MLP logits** (not first-layer pre-acts) concentrates capacity on the decision signal — consistent with interpretability goals.
 * A **simple λ sweep** is sufficient to steer average sparsity in this setting.Validation reconstruction error is **0.1743** in the normalized SAE space (raw ≈ **8.404**), with train/val/test tightly clustered, indicating stable generalization of the learned dictionary.
+
 Validation CE rises from **0.1061** (baseline logits) to **0.3659** (SAE recon), consistent with the observed accuracy drop and leaving room for λ/θ tuning to recover fidelity.
 
 
