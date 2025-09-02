@@ -6,6 +6,7 @@ We train a small MNIST classifier (FFN), then fit a **JumpReLU** sparse autoenco
 Target sparsity is **~1 active latent per example** (MNIST has 10 classes).  
 Fidelity is measured as test accuracy when replacing model logits with SAE-reconstructed logits.  
 Best run: target_actives=1 → achieved=1.63 actives/example; Δ accuracy = 5.62 pp (97.21% → 91.59%); Val recon MSE = 0.1743 (normalized space) / 8.4039 (raw space).
+
 With bs=8, an MLP sweep over hidden∈{1024, 8192} and LR∈{1e-1,1e-2,1e-3,1e-4} found a best baseline at **hidden=8192, lr=1e-4**: **Val CE 0.0809**, **Test CE 0.0738**, **Test Acc 0.9759**.
 Validation classifier loss (CE): baseline 0.1061 → SAE-reconstructed 0.3659 (ΔCE +0.2598).
 The notebook writes **`artifacts_mnist_sae_logits/BEST_RESULTS.md`** with the best run.
