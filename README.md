@@ -150,7 +150,6 @@ We trained 8 MLPs with hidden ∈ {1024, 8192} and LR ∈ {1e-1, 1e-2, 1e-3, 1e-
 | 2 | 1024 | 1e-3 | 0.1054 | 0.9709 | — | — | `ffn_d1024_lr1em03.pt` |
 | 3 | 1024 | 1e-4 | 0.1218 | 0.9653 | — | — | `ffn_d1024_lr1em04.pt` |
 
-Full sweep results: `artifacts_mnist_sae_logits/ffn_sweep/summary_ffn_sweep.json`.
 
 ### Classifier Loss & Accuracy
 
