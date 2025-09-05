@@ -716,3 +716,158 @@ for i, r in enumerate(top3, 1):
 print("\nBest (Val CE):")
 print(best)
 best_ckpt = best["ckpt"]
+# Cell 19 — Transcoder config (fixed hidden dim = 1024)
+HIDDEN_DIM_TX = 1024
+BATCH_TX      = 8
+EPOCHS_TX_MLP = 3
+LR_TX_MLP     = 1e-3
+
+TX_LR     = 1e-3
+TX_WD     = 1e-4
+TX_EPOCHS = 5
+TX_BS     = 256
+
+TX_DIR = os.path.join(OUT_DIR, "transcoder_1024")
+os.makedirs(TX_DIR, exist_ok=True)
+
+dl_train_tx, dl_val_tx, dl_test_tx = load_mnist(batch_size=BATCH_TX)
+# Cell 20 — Train two 1024-wide MLPs A and B
+def train_ffn_with_seed(seed, ffn_type="ReLU", hidden=HIDDEN_DIM_TX, lr=LR_TX_MLP, epochs=EPOCHS_TX_MLP):
+    pl.seed_everything(seed, workers=True)
+    m = MNIST_FFN(ffn_type=ffn_type, d_h=hidden, lr=lr)
+    tr = _trainer(epochs)
+    tr.fit(m, dl_train_tx, dl_val_tx)
+    return m
+
+modelA = train_ffn_with_seed(123, hidden=HIDDEN_DIM_TX)
+modelB = train_ffn_with_seed(456, hidden=HIDDEN_DIM_TX)
+
+@torch.no_grad()
+def ce_acc(model, loader):
+    ce, acc = ce_and_acc_over_img_loader(model, loader, device=device)
+    return ce, acc
+
+print("Model A 1024 | Val CE/Acc:", ce_acc(modelA, dl_val_tx))
+print("Model B 1024 | Val CE/Acc:", ce_acc(modelB, dl_val_tx))
+# Cell 21 — Collect hidden preactivations z = x W_in for A and B
+@torch.no_grad()
+def collect_preacts(model, loader):
+    model.eval().to(device)
+    Z = []
+    for xb, _ in loader:
+        xb = xb.to(device)
+        x_flat = xb.view(xb.size(0), -1)
+        z = torch.einsum('bi,ih->bh', x_flat, model.ffn.W_in_ih)
+        Z.append(z.cpu())
+    return torch.cat(Z, dim=0)
+
+ZA_tr, ZB_tr = collect_preacts(modelA, dl_train_tx), collect_preacts(modelB, dl_train_tx)
+ZA_va, ZB_va = collect_preacts(modelA, dl_val_tx),   collect_preacts(modelB, dl_val_tx)
+ZA_te, ZB_te = collect_preacts(modelA, dl_test_tx),  collect_preacts(modelB, dl_test_tx)
+print("Train shapes:", ZA_tr.shape, ZB_tr.shape)
+# Cell 22 — Standardize A and B spaces and build z loaders
+muA, stdA = ZA_tr.mean(0, keepdim=True), ZA_tr.std(0, keepdim=True).clamp_min(1e-6)
+muB, stdB = ZB_tr.mean(0, keepdim=True), ZB_tr.std(0, keepdim=True).clamp_min(1e-6)
+
+def znorm(Z, mu, std): return (Z - mu) / std
+ZA_tr_n, ZB_tr_n = znorm(ZA_tr, muA, stdA), znorm(ZB_tr, muB, stdB)
+ZA_va_n, ZB_va_n = znorm(ZA_va, muA, stdA), znorm(ZB_va, muB, stdB)
+ZA_te_n, ZB_te_n = znorm(ZA_te, muA, stdA), znorm(ZB_te, muB, stdB)
+
+def zloader(ZA, ZB, bs=TX_BS, shuffle=True):
+    return DataLoader(TensorDataset(ZA, ZB), batch_size=bs, shuffle=shuffle,
+                      num_workers=2, pin_memory=torch.cuda.is_available())
+
+dl_z_tr = zloader(ZA_tr_n, ZB_tr_n, bs=TX_BS, shuffle=True)
+dl_z_va = zloader(ZA_va_n, ZB_va_n, bs=TX_BS, shuffle=False)
+dl_z_te = zloader(ZA_te_n, ZB_te_n, bs=TX_BS, shuffle=False)
+# Cell 23 — Train linear transcoder T: A→B in normalized space
+class Transcoder(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.lin = nn.Linear(d, d, bias=True)
+        nn.init.zeros_(self.lin.bias)
+    def forward(self, zA_n):
+        return self.lin(zA_n)
+
+def train_transcoder(d, dl_train, dl_val, lr=TX_LR, wd=TX_WD, epochs=TX_EPOCHS):
+    T = Transcoder(d).to(device)
+    opt = torch.optim.Adam(T.parameters(), lr=lr, weight_decay=wd)
+    best_va = float('inf'); best = None
+    for ep in range(1, epochs+1):
+        T.train(); tr_loss=0.0; n=0
+        for a_n, b_n in dl_train:
+            a_n, b_n = a_n.to(device), b_n.to(device)
+            loss = F.mse_loss(T(a_n), b_n)
+            opt.zero_grad(); loss.backward(); opt.step()
+            tr_loss += loss.item()*a_n.size(0); n += a_n.size(0)
+        tr_loss /= max(n,1)
+        T.eval(); va_loss=0.0; n=0
+        with torch.no_grad():
+            for a_n, b_n in dl_val:
+                a_n, b_n = a_n.to(device), b_n.to(device)
+                va_loss += F.mse_loss(T(a_n), b_n).item()*a_n.size(0); n += a_n.size(0)
+        va_loss /= max(n,1)
+        print(f"Transcoder ep {ep}/{epochs} | train MSE {tr_loss:.6f} | val MSE {va_loss:.6f}")
+        if va_loss < best_va:
+            best_va = va_loss
+            best = {k:v.detach().cpu().clone() for k,v in T.state_dict().items()}
+    if best is not None: T.load_state_dict(best)
+    return T, best_va
+
+D = HIDDEN_DIM_TX
+T_AB, best_va_mse = train_transcoder(D, dl_z_tr, dl_z_va)
+torch.save({"state_dict": T_AB.state_dict(), "muA": muA, "stdA": stdA, "muB": muB, "stdB": stdB},
+           os.path.join(TX_DIR, "transcoder_A_to_B.pt"))
+print("Saved:", os.path.join(TX_DIR, "transcoder_A_to_B.pt"))
+# Cell 24 — Evaluate transcoder MSE in normalized and raw spaces
+@torch.no_grad()
+def transcoder_mse(T, ZA, ZB, muA, stdA, muB, stdB, batch=2048):
+    T.eval().to(device)
+    total_n=total_r=0.0; count=0
+    for i in range(0, ZA.size(0), batch):
+        a, b = ZA[i:i+batch].to(device), ZB[i:i+batch].to(device)
+        a_n = (a - muA.to(device)) / (stdA.to(device) + 1e-8)
+        b_n = (b - muB.to(device)) / (stdB.to(device) + 1e-8)
+        b_hat_n = T(a_n)
+        diff_n = b_hat_n - b_n
+        mse_n  = diff_n.pow(2).mean().item()
+        b_hat  = b_hat_n * (stdB.to(device) + 1e-8) + muB.to(device)
+        diff_r = b_hat - b
+        mse_r  = diff_r.pow(2).mean().item()
+        total_n += mse_n * diff_n.numel()
+        total_r += mse_r * diff_r.numel()
+        count   += diff_n.numel()
+    return total_n/count, total_r/count
+
+va_mse_n, va_mse_r = transcoder_mse(T_AB, ZA_va, ZB_va, muA, stdA, muB, stdB)
+te_mse_n, te_mse_r = transcoder_mse(T_AB, ZA_te, ZB_te, muA, stdA, muB, stdB)
+print(f"Transcoder MSE normalized | val {va_mse_n:.6f} | test {te_mse_n:.6f}")
+print(f"Transcoder MSE raw        | val {va_mse_r:.6f} | test {te_mse_r:.6f}")
+# Cell 25 — Functional test: substitute T(A) into B and score CE and Acc
+@torch.no_grad()
+def ce_acc_B_with_transcoder(A, B, T, loader, muA, stdA, muB, stdB):
+    A.eval().to(device); B.eval().to(device); T.eval().to(device)
+    ce_sum=0.0; correct=0; seen=0
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device).long()
+        x_flat = xb.view(xb.size(0), -1)
+        zA = torch.einsum('bi,ih->bh', x_flat, A.ffn.W_in_ih)
+        zA_n = (zA - muA.to(device)) / (stdA.to(device) + 1e-8)
+        zB_hat_n = T(zA_n)
+        zB_hat = zB_hat_n * (stdB.to(device) + 1e-8) + muB.to(device)
+        hB = F.relu(zB_hat)
+        logits_hat = torch.einsum('bh,ho->bo', hB, B.ffn.W_out_ho)
+        ce_sum += F.cross_entropy(logits_hat, yb, reduction="sum").item()
+        correct += (logits_hat.argmax(dim=1) == yb).sum().item()
+        seen += yb.numel()
+    return ce_sum / max(seen,1), correct / max(seen,1)
+
+ceB_val, accB_val = ce_acc(modelB, dl_val_tx)
+ceB_te,  accB_te  = ce_acc(modelB, dl_test_tx)
+ceTX_val, accTX_val = ce_acc_B_with_transcoder(modelA, modelB, T_AB, dl_val_tx, muA, stdA, muB, stdB)
+ceTX_te,  accTX_te  = ce_acc_B_with_transcoder(modelA, modelB, T_AB, dl_test_tx, muA, stdA, muB, stdB)
+
+print("Functional fidelity T(A)→B")
+print(f"VAL  | CE base {ceB_val:.4f} | CE T {ceTX_val:.4f} | ΔCE {ceTX_val - ceB_val:+.4f} | Acc base {accB_val:.4f} | Acc T {accTX_val:.4f} | ΔAcc {accTX_val - accB_val:+.4f}")
+print(f"TEST | CE base {ceB_te:.4f}  | CE T {ceTX_te:.4f}  | ΔCE {ceTX_te - ceB_te:+.4f}  | Acc base {accB_te:.4f}  | Acc T {accTX_te:.4f}  | ΔAcc {accTX_te - accB_te:+.4f}")
