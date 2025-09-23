@@ -1,10 +1,24 @@
+# Cell 0: Clean reinstall Torch stack for CUDA 12.1 (Colab)
+!pip uninstall -y torch torchvision torchaudio pytorch-lightning numpy
 
+# Install *matching* torch + torchvision wheels
+!pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 torchaudio==2.2.2+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
+
+# Stable Lightning + Numpy
+!pip install "pytorch-lightning<3" numpy==1.26.4
+
+# Research deps
+!pip install transformer_lens
+!pip install git+https://github.com/neelnanda-io/Tracr
+
+
+# Cell 1: Imports & constants
 import os, json
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 import pytorch_lightning as pl
 
@@ -12,26 +26,27 @@ SEED = 42
 pl.seed_everything(SEED, workers=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device:", device)
+print("Using device:", device)
 
-# Base classifier
-FFN_TYPE     = "ReLU"   # "ReLU" or "GeGLU"
-HIDDEN_DIM   = 128
-LR_FFN       = 1e-3
-EPOCHS_FFN   = 3
-BATCH_FFN    = 8         # reviewer asked for small batch size
-
-# SAE/Buffer
-NORMALIZE_Y  = True      # standardize logits per-dim
-SAE_LATENTS  = 32        # logits are 10-d; 32 latents is plenty
-TAU          = 0.1       # STE temperature
-INIT_THETA   = 0.5
-LR_SAE_FINAL = 1e-3
+# SAE hyperparameters
+SAE_LATENTS      = 32
+TAU              = 0.1
+INIT_THETA       = 0.5
+LR_SAE_FINAL     = 1e-3
 EPOCHS_SAE_FINAL = 5
-BATCH_SAE    = 8
-TARGET_ACTIVES = [1]
-OUT_DIR = "artifacts_mnist_sae_logits"
+BATCH_SAE        = 8
+
+OUT_DIR = "artifacts_reversal_sae"
 os.makedirs(OUT_DIR, exist_ok=True)
+
+
+
+
+
+
+
+
+
 
 def load_mnist(batch_size=BATCH_FFN):
     tfm = transforms.Compose([transforms.ToTensor()])
@@ -49,6 +64,7 @@ def load_mnist(batch_size=BATCH_FFN):
     return dl_train, dl_val, dl_test
 
 dl_train, dl_val, dl_test = load_mnist()
+
 
 class FFN_GeGLU(nn.Module):
     def __init__(self, d_i, d_h, d_o):
@@ -118,6 +134,7 @@ model = MNIST_FFN(FFN_TYPE, HIDDEN_DIM, LR_FFN)
 _tr = _trainer(EPOCHS_FFN)
 _tr.fit(model, dl_train, dl_val)
 
+
 @torch.no_grad()
 def baseline_accuracy(model, loader):
     model.eval().to(device)
@@ -131,6 +148,7 @@ def baseline_accuracy(model, loader):
 
 base_test_acc = baseline_accuracy(model, dl_test)
 print(f"Baseline test accuracy: {base_test_acc:.4f}")
+
 
 @torch.no_grad()
 def collect_logits_buffers(model, loader):
@@ -156,6 +174,7 @@ if NORMALIZE_Y:
 else:
     mu_bo, std_bo = 0.0, 1.0
     Ytr_n, Yva_n, Yte_n = Ytr_bo, Yva_bo, Yte_bo
+
 
 class SAE_JumpReLU(pl.LightningModule):
     def __init__(self, d_in, d_latents=32, lambda_l0=1e-2, lr=1e-3, init_theta=0.5, tau=0.1):
@@ -237,6 +256,7 @@ def test_accuracy_with_sae_logits(model, loader, sae, mu_bo, std_bo):
         total   += y_gt.numel()
     return correct / max(total, 1)
 
+
 def _trainer_sae(max_epochs):
     use_gpu = torch.cuda.is_available()
     has_bf16 = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
@@ -276,6 +296,7 @@ def calibrate_lambda(Ytr, Yva, target_actives, coarse_grid=np.geomspace(1e-6, 1e
         if gap < best["gap"]:
             best = {"lam": float(lam), "sae": sae, "m_act": float(m_act), "gap": float(gap)}
     return best
+
 
 # device-safe overrides that work with both SAE variants (with .theta or .act.theta)
 def _get_theta(sae):
@@ -327,6 +348,7 @@ def test_accuracy_with_mode(model, loader, ffn_type, sae, mu, std, mode="jumprel
         correct += (preds == yb).sum().item()
         total   += yb.numel()
     return correct / max(total, 1)
+
 
 # Cell 9 — robust & fast SAE run (fixes Cell 9 crash)
 # - Uses small subsets for calibration/final SAE
@@ -413,12 +435,14 @@ with open(os.path.join(OUT_DIR, "BEST_RESULTS.md"), "w") as f:
 print("\nWrote:", os.path.join(OUT_DIR, "summary.json"))
 print("Wrote:", os.path.join(OUT_DIR, "BEST_RESULTS.md"))
 
+
 best_path = os.path.join(OUT_DIR, "BEST_RESULTS.md")
 if os.path.exists(best_path):
     with open(best_path, "r") as f:
         print(f.read())
 else:
     print("Run Cell 9 first to generate BEST_RESULTS.md")
+
 
 # Cell 12 — Consistent reconstruction-MSE evaluators (normalized vs unnormalized)
 
@@ -513,6 +537,7 @@ def mse_over_loader(sae, loader, mu=None, std=None, mode="jumprelu", compare_spa
 
     return total_sqerr / max(total_count, 1)
 
+
 # Cell 13 — Compute train/val/test MSE in normalized space (matches training logs) and raw space
 
 # Reuse your existing hidden-activation tensors & loaders (the same reps you trained the SAE on):
@@ -534,7 +559,8 @@ te_mse_raw = mse_over_loader(sae_final, test_loader,  mu=mu_bo, std=std_bo, comp
 print(f"[Recon MSE — normalized space] train={tr_mse_norm:.6f} | val={va_mse_norm:.6f} | test={te_mse_norm:.6f}")
 print(f"[Recon MSE — raw space]        train={tr_mse_raw:.6f}  | val={va_mse_raw:.6f}  | test={te_mse_raw:.6f}")
 
-# Cell 14-per-example MSE distribution and best/worst examples (on validation set)
+
+# Cell 14 — Optional: per-example MSE distribution and best/worst examples (on validation set)
 
 import torch
 
@@ -566,6 +592,8 @@ worst_idx = int(torch.argmax(val_per_ex_mse))
 print(f"[Val per-example MSE — normalized] mean={val_avg:.6f} | median={val_med:.6f} | p95={val_p95:.6f}")
 print(f"Best example idx={best_idx} mse={val_per_ex_mse[best_idx].item():.6f}")
 print(f"Worst example idx={worst_idx} mse={val_per_ex_mse[worst_idx].item():.6f}")
+
+
 # Cell 15 — CE/accuracy helpers that work with your loaders and model
 
 import torch
@@ -601,6 +629,8 @@ def ce_and_acc_over_img_loader_with_sae(model, loader, sae, mu_bo, std_bo, devic
         correct  += (y_hat_bO.argmax(dim=1) == y_gt).sum().item()
         seen     += y_gt.numel()
     return ce_sum / max(seen, 1), correct / max(seen, 1)
+
+
 # Cell 16 — Compute CE/Acc for baseline vs SAE on all splits
 
 # Baseline (no SAE)
@@ -617,6 +647,8 @@ print("=== Cross-Entropy (↓) / Accuracy (↑) ===")
 print(f"TRAIN | CE base {tr_ce_base:.4f} | CE SAE {tr_ce_sae:.4f} | ΔCE {tr_ce_sae - tr_ce_base:+.4f} | Acc base {tr_acc_base:.4f} | Acc SAE {tr_acc_sae:.4f} | ΔAcc {tr_acc_sae - tr_acc_base:+.4f}")
 print(f"VAL   | CE base {va_ce_base:.4f} | CE SAE {va_ce_sae:.4f} | ΔCE {va_ce_sae - va_ce_base:+.4f} | Acc base {va_acc_base:.4f} | Acc SAE {va_acc_sae:.4f} | ΔAcc {va_acc_sae - va_acc_base:+.4f}")
 print(f"TEST  | CE base {te_ce_base:.4f} | CE SAE {te_ce_sae:.4f} | ΔCE {te_ce_sae - te_ce_base:+.4f} | Acc base {te_acc_base:.4f} | Acc SAE {te_acc_sae:.4f} | ΔAcc {te_acc_sae - te_acc_base:+.4f}")
+
+
 # Cell 17 — MLP sweep: configs + train/eval helper
 
 from copy import deepcopy
@@ -670,6 +702,8 @@ def train_eval_ffn(d_h, lr, epochs=SWEEP_EPOCHS, ffn_type=FFN_TYPE):
         "test_acc_alt": te_acc2,
         "ffn_type": ffn_type,
     }, m
+
+
 # Cell 18 — Execute sweep and pick best by lowest validation CE
 
 def _lr_tag(x):  # safe filename tag for LRs
@@ -716,6 +750,8 @@ for i, r in enumerate(top3, 1):
 print("\nBest (Val CE):")
 print(best)
 best_ckpt = best["ckpt"]
+
+
 # Cell 19 — Transcoder config (fixed hidden dim = 1024)
 HIDDEN_DIM_TX = 1024
 BATCH_TX      = 8
@@ -731,6 +767,8 @@ TX_DIR = os.path.join(OUT_DIR, "transcoder_1024")
 os.makedirs(TX_DIR, exist_ok=True)
 
 dl_train_tx, dl_val_tx, dl_test_tx = load_mnist(batch_size=BATCH_TX)
+
+
 # Cell 20 — Train two 1024-wide MLPs A and B
 def train_ffn_with_seed(seed, ffn_type="ReLU", hidden=HIDDEN_DIM_TX, lr=LR_TX_MLP, epochs=EPOCHS_TX_MLP):
     pl.seed_everything(seed, workers=True)
@@ -749,6 +787,8 @@ def ce_acc(model, loader):
 
 print("Model A 1024 | Val CE/Acc:", ce_acc(modelA, dl_val_tx))
 print("Model B 1024 | Val CE/Acc:", ce_acc(modelB, dl_val_tx))
+
+
 # Cell 21 — Collect hidden preactivations z = x W_in for A and B
 @torch.no_grad()
 def collect_preacts(model, loader):
@@ -765,6 +805,8 @@ ZA_tr, ZB_tr = collect_preacts(modelA, dl_train_tx), collect_preacts(modelB, dl_
 ZA_va, ZB_va = collect_preacts(modelA, dl_val_tx),   collect_preacts(modelB, dl_val_tx)
 ZA_te, ZB_te = collect_preacts(modelA, dl_test_tx),  collect_preacts(modelB, dl_test_tx)
 print("Train shapes:", ZA_tr.shape, ZB_tr.shape)
+
+
 # Cell 22 — Standardize A and B spaces and build z loaders
 muA, stdA = ZA_tr.mean(0, keepdim=True), ZA_tr.std(0, keepdim=True).clamp_min(1e-6)
 muB, stdB = ZB_tr.mean(0, keepdim=True), ZB_tr.std(0, keepdim=True).clamp_min(1e-6)
@@ -781,6 +823,8 @@ def zloader(ZA, ZB, bs=TX_BS, shuffle=True):
 dl_z_tr = zloader(ZA_tr_n, ZB_tr_n, bs=TX_BS, shuffle=True)
 dl_z_va = zloader(ZA_va_n, ZB_va_n, bs=TX_BS, shuffle=False)
 dl_z_te = zloader(ZA_te_n, ZB_te_n, bs=TX_BS, shuffle=False)
+
+
 # Cell 23 — Train linear transcoder T: A→B in normalized space
 class Transcoder(nn.Module):
     def __init__(self, d):
@@ -820,6 +864,8 @@ T_AB, best_va_mse = train_transcoder(D, dl_z_tr, dl_z_va)
 torch.save({"state_dict": T_AB.state_dict(), "muA": muA, "stdA": stdA, "muB": muB, "stdB": stdB},
            os.path.join(TX_DIR, "transcoder_A_to_B.pt"))
 print("Saved:", os.path.join(TX_DIR, "transcoder_A_to_B.pt"))
+
+
 # Cell 24 — Evaluate transcoder MSE in normalized and raw spaces
 @torch.no_grad()
 def transcoder_mse(T, ZA, ZB, muA, stdA, muB, stdB, batch=2048):
@@ -844,6 +890,8 @@ va_mse_n, va_mse_r = transcoder_mse(T_AB, ZA_va, ZB_va, muA, stdA, muB, stdB)
 te_mse_n, te_mse_r = transcoder_mse(T_AB, ZA_te, ZB_te, muA, stdA, muB, stdB)
 print(f"Transcoder MSE normalized | val {va_mse_n:.6f} | test {te_mse_n:.6f}")
 print(f"Transcoder MSE raw        | val {va_mse_r:.6f} | test {te_mse_r:.6f}")
+
+
 # Cell 25 — Functional test: substitute T(A) into B and score CE and Acc
 @torch.no_grad()
 def ce_acc_B_with_transcoder(A, B, T, loader, muA, stdA, muB, stdB):
@@ -871,3 +919,513 @@ ceTX_te,  accTX_te  = ce_acc_B_with_transcoder(modelA, modelB, T_AB, dl_test_tx,
 print("Functional fidelity T(A)→B")
 print(f"VAL  | CE base {ceB_val:.4f} | CE T {ceTX_val:.4f} | ΔCE {ceTX_val - ceB_val:+.4f} | Acc base {accB_val:.4f} | Acc T {accTX_val:.4f} | ΔAcc {accTX_val - accB_val:+.4f}")
 print(f"TEST | CE base {ceB_te:.4f}  | CE T {ceTX_te:.4f}  | ΔCE {ceTX_te - ceB_te:+.4f}  | Acc base {accB_te:.4f}  | Acc T {accTX_te:.4f}  | ΔAcc {accTX_te - accB_te:+.4f}")
+
+
+# Cell 26 — Collect input x and target logits h from *the same MLP* (modelA)
+
+NORMALIZE_TX = True         # standardize targets per-dim (recommended)
+TX_LATENTS   = 128          # latent width for sparse T(x) -> h
+TX_TAU       = 0.1          # STE temperature
+TX_INIT_TH   = 0.5          # init threshold
+TX_LAMBDA    = 1e-2         # L0 (soft) weight
+TX_LR        = 1e-3
+TX_EPOCHS    = 5
+TX_BS        = 256
+
+assert 'modelA' in globals(), "modelA (1024-wide MLP) not found. Train it first with your Cell 20."
+
+@torch.no_grad()
+def collect_x_and_logits(model, loader):
+    model.eval().to(device)
+    X_list, H_list = [], []
+    for xb, _ in loader:
+        xb = xb.to(device)
+        # x_flat in [0,1], shape [B, 784]
+        x_flat = xb.view(xb.size(0), -1)
+        # h = logits = W_out @ ReLU(W_in @ x)
+        h = model(xb)  # logits (pre-softmax)
+        X_list.append(x_flat.cpu())
+        H_list.append(h.cpu())
+    return torch.cat(X_list, 0), torch.cat(H_list, 0)
+
+Xtr, Htr = collect_x_and_logits(modelA, dl_train_tx)
+Xva, Hva = collect_x_and_logits(modelA, dl_val_tx)
+Xte, Hte = collect_x_and_logits(modelA, dl_test_tx)
+print("Shapes — X:", Xtr.shape, Xva.shape, Xte.shape, "  H:", Htr.shape, Hva.shape, Hte.shape)
+
+# Standardize targets (logits) per-dimension; inputs x are already in [0,1]
+if NORMALIZE_TX:
+    mu_h  = Htr.mean(0, keepdim=True)
+    std_h = Htr.std(0, keepdim=True).clamp_min(1e-6)
+    Htr_n = (Htr - mu_h) / std_h
+    Hva_n = (Hva - mu_h) / std_h
+    Hte_n = (Hte - mu_h) / std_h
+else:
+    mu_h, std_h = None, None
+    Htr_n, Hva_n, Hte_n = Htr, Hva, Hte
+
+def loader_xh(X, H, bs=TX_BS, shuffle=True):
+    pin = torch.cuda.is_available()
+    return DataLoader(TensorDataset(X, H), batch_size=bs, shuffle=shuffle, num_workers=2, pin_memory=pin)
+
+dl_tx_tr = loader_xh(Xtr, Htr_n, bs=TX_BS, shuffle=True)
+dl_tx_va = loader_xh(Xva, Hva_n, bs=TX_BS, shuffle=False)
+dl_tx_te = loader_xh(Xte, Hte_n, bs=TX_BS, shuffle=False)
+
+
+# Cell 27 — JumpReLU Transcoder: x->[latent]->h (logits), with L0 via hard gate count
+
+class TranscoderJumpReLU(pl.LightningModule):
+    def __init__(self, d_in=28*28, d_lat=TX_LATENTS, d_out=10,
+                 tau=TX_TAU, init_theta=TX_INIT_TH, lambda_l0=TX_LAMBDA, lr=TX_LR):
+        super().__init__()
+        self.save_hyperparameters()
+        self.enc = nn.Linear(d_in, d_lat, bias=True)
+        self.theta_h = nn.Parameter(torch.full((d_lat,), float(init_theta)))
+        self.dec = nn.Linear(d_lat, d_out, bias=True)
+        self.tau = tau
+
+    def forward(self, x):
+        u = self.enc(x)                                         # pre-gate
+        soft = torch.sigmoid((u - self.theta_h) / self.tau)     # surrogate
+        hard = (u > self.theta_h).float()                       # hard gate
+        gate = (hard - soft).detach() + soft                    # STE
+        f = u * gate                                            # sparse latents
+        h_hat = self.dec(f)                                     # predict logits (normalized space if we trained on normalized)
+        return h_hat, f, u, soft, hard
+
+    def _step(self, batch):
+        x, h_tgt = batch
+        h_hat, f, u, soft, hard = self(x)
+        recon = F.mse_loss(h_hat, h_tgt, reduction="mean")
+        l0_soft = soft.sum(dim=1).mean()
+        loss = recon + self.hparams.lambda_l0 * l0_soft
+        l0_hard = hard.sum(dim=1).float().mean().detach()
+        logs = {"recon_mse": recon.detach(), "l0_soft": l0_soft.detach(), "l0_hard": l0_hard}
+        return loss, logs
+
+    def training_step(self, batch, _):
+        loss, logs = self._step(batch)
+        self.log_dict({f"train/{k}": v for k,v in logs.items()}, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, _):
+        _, logs = self._step(batch)
+        self.log_dict({f"val/{k}": v for k,v in logs.items()}, prog_bar=True)
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+
+def train_transcoder_x_to_h():
+    T = TranscoderJumpReLU(d_in=28*28, d_lat=TX_LATENTS, d_out=10)
+    tr = _trainer(TX_EPOCHS)
+    tr.fit(T, dl_tx_tr, dl_tx_va)
+    return T
+
+T_xh = train_transcoder_x_to_h()
+
+
+# Task
+Implement a transcoder model that takes the input `x` of a given MLP and predicts the hidden pre-activations `h` of that MLP. The implementation should include reconstruction error (MSE) and L0 sparsity regularization. Modify the existing code cells to reflect this new transcoder definition and training process.
+
+## Modify data loading for transcoder
+
+### Subtask:
+Update the data loading to provide pairs of original input `x` and hidden pre-activations `h` from a single trained MLP.
+
+
+**Reasoning**:
+The subtask requires collecting pairs of input images and hidden pre-activations from a single MLP. The new function `collect_input_preacts` is needed to achieve this, and then it will be called for the train, validation, and test sets using `modelA` and the corresponding data loaders. Finally, the shapes will be printed to verify the output.
+
+
+
+# Cell 28 — Report reconstruction error (MSE) and L0
+
+@torch.no_grad()
+def mse_split(T, X, H, mu_h=None, std_h=None, bs=1024):
+    T.eval().to(device)
+    total_n = total_r = 0.0
+    cnt_n = cnt_r = 0
+    for i in range(0, X.size(0), bs):
+        x = X[i:i+bs].to(device)
+        h_raw = H[i:i+bs].to(device)
+        # normalized targets used in training
+        h_tgt_n = (h_raw - mu_h.to(device)) / (std_h.to(device) + 1e-8) if (mu_h is not None) else h_raw
+        h_hat_n, *_ = T(x.to(device))
+        # normalized MSE
+        diff_n = h_hat_n - h_tgt_n
+        total_n += diff_n.pow(2).sum().item()
+        cnt_n   += diff_n.numel()
+        # raw MSE (map prediction back if normalized training)
+        if mu_h is not None:
+            h_hat_raw = h_hat_n * (std_h.to(device) + 1e-8) + mu_h.to(device)
+        else:
+            h_hat_raw = h_hat_n
+        diff_r = h_hat_raw - h_raw
+        total_r += diff_r.pow(2).sum().item()
+        cnt_r   += diff_r.numel()
+    return total_n/max(cnt_n,1), total_r/max(cnt_r,1)
+
+tr_mse_n, tr_mse_r = mse_split(T_xh, Xtr, Htr, mu_h, std_h)
+va_mse_n, va_mse_r = mse_split(T_xh, Xva, Hva, mu_h, std_h)
+te_mse_n, te_mse_r = mse_split(T_xh, Xte, Hte, mu_h, std_h)
+
+print(f"[T(x)->h MSE — normalized] train={tr_mse_n:.6f} | val={va_mse_n:.6f} | test={te_mse_n:.6f}")
+print(f"[T(x)->h MSE — raw]        train={tr_mse_r:.6f}  | val={va_mse_r:.6f}  | test={te_mse_r:.6f}")
+
+@torch.no_grad()
+def mean_hard_actives(T, X, bs=2048):
+    T.eval().to(device)
+    acts = []
+    for i in range(0, X.size(0), bs):
+        x = X[i:i+bs].to(device)
+        _, _, u, _, _ = T(x)
+        acts.append((u > T.theta_h).float().sum(dim=1).cpu())
+    acts = torch.cat(acts, 0)
+    return float(acts.mean()), float(acts.median()), float(acts.quantile(0.95))
+
+l0_mean, l0_med, l0_p95 = mean_hard_actives(T_xh, Xva)
+print(f"[T(x)->h L0 (hard gate count) — VAL] mean={l0_mean:.2f} | median={l0_med:.2f} | p95={l0_p95:.2f}")
+
+
+# Cell 29 — Optional fidelity: use T(x) logits directly to score CE/Acc vs labels
+
+@torch.no_grad()
+def ce_acc_with_T_logits(loader, T, mu_h=None, std_h=None):
+    T.eval().to(device)
+    ce_sum=0.0; correct=0; seen=0
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device).long()
+        x_flat = xb.view(xb.size(0), -1)
+        h_hat_n, _f, _u, _s, _h = T(x_flat)
+        logits = h_hat_n * (std_h.to(device) + 1e-8) + mu_h.to(device) if (mu_h is not None) else h_hat_n
+        ce_sum += F.cross_entropy(logits, yb, reduction="sum").item()
+        correct += (logits.argmax(dim=1) == yb).sum().item()
+        seen += yb.numel()
+    return ce_sum/max(seen,1), correct/max(seen,1)
+
+# Baseline CE/Acc from modelA logits
+tr_ce_base, tr_acc_base = ce_and_acc_over_img_loader(modelA, dl_train_tx, device=device)
+va_ce_base, va_acc_base = ce_and_acc_over_img_loader(modelA, dl_val_tx,   device=device)
+te_ce_base, te_acc_base = ce_and_acc_over_img_loader(modelA, dl_test_tx,  device=device)
+
+# CE/Acc from T(x) logits
+tr_ce_T, tr_acc_T = ce_acc_with_T_logits(dl_train_tx, T_xh, mu_h, std_h)
+va_ce_T, va_acc_T = ce_acc_with_T_logits(dl_val_tx,   T_xh, mu_h, std_h)
+te_ce_T, te_acc_T = ce_acc_with_T_logits(dl_test_tx,  T_xh, mu_h, std_h)
+
+print("=== CE/Acc using T(x) logits ===")
+print(f"TRAIN | CE base {tr_ce_base:.4f} | CE T {tr_ce_T:.4f} | ΔCE {tr_ce_T - tr_ce_base:+.4f} | Acc base {tr_acc_base:.4f} | Acc T {tr_acc_T:.4f} | ΔAcc {tr_acc_T - tr_acc_base:+.4f}")
+print(f"VAL   | CE base {va_ce_base:.4f} | CE T {va_ce_T:.4f} | ΔCE {va_ce_T - va_ce_base:+.4f} | Acc base {va_acc_base:.4f} | Acc T {va_acc_T:.4f} | ΔAcc {va_acc_T - va_acc_base:+.4f}")
+print(f"TEST  | CE base {te_ce_base:.4f} | CE T {te_ce_T:.4f} | ΔCE {te_ce_T - te_ce_base:+.4f} | Acc base {te_acc_base:.4f} | Acc T {te_acc_T:.4f} | ΔAcc {te_acc_T - te_acc_base:+.4f}")
+
+
+# Cell 30 — Collect (h1, h2) from modelA (d=1024 → 10)
+# h1 = ReLU(W_in @ x), h2 = W_out @ h1
+
+@torch.no_grad()
+def collect_h1_h2(model, loader):
+    model.eval().to(device)
+    H1, H2, Y = [], [], []
+    for xb, yb in loader:
+        xb = xb.to(device); yb = yb.to(device).long()
+        x_flat = xb.view(xb.size(0), -1)
+        z  = torch.einsum('bi,ih->bh', x_flat, model.ffn.W_in_ih)   # pre-acts
+        h1 = F.relu(z)                                              # (B, 1024)
+        h2 = torch.einsum('bh,ho->bo', h1, model.ffn.W_out_ho)      # logits (B, 10)
+        H1.append(h1.cpu()); H2.append(h2.cpu()); Y.append(yb.cpu())
+    return torch.cat(H1), torch.cat(H2), torch.cat(Y)
+
+# Use the same 1024-wide modelA you trained earlier
+H1_tr, H2_tr, Y_tr = collect_h1_h2(modelA, dl_train_tx)
+H1_va, H2_va, Y_va = collect_h1_h2(modelA, dl_val_tx)
+H1_te, H2_te, Y_te = collect_h1_h2(modelA, dl_test_tx)
+
+# Normalize targets h2 (primary MSE reported in this space)
+mu_h2  = H2_tr.mean(0, keepdim=True)
+std_h2 = H2_tr.std(0, keepdim=True).clamp_min(1e-6)
+
+H2_tr_n = (H2_tr - mu_h2) / std_h2
+H2_va_n = (H2_va - mu_h2) / std_h2
+H2_te_n = (H2_te - mu_h2) / std_h2
+
+def loader_h1_h2(H1, H2n, bs=256, shuffle=True):
+    return DataLoader(
+        TensorDataset(H1, H2n),
+        batch_size=bs, shuffle=shuffle, num_workers=2, pin_memory=torch.cuda.is_available()
+    )
+
+dl_h_tr = loader_h1_h2(H1_tr, H2_tr_n, bs=256, shuffle=True)
+dl_h_va = loader_h1_h2(H1_va, H2_va_n, bs=256, shuffle=False)
+dl_h_te = loader_h1_h2(H1_te, H2_te_n, bs=256, shuffle=False)
+
+
+# Cell 31 — JumpReLU Transcoder T: h1(1024) → h2(10) with L0 penalty
+
+TXH_LATENTS = 128    # hidden features inside T; adjust if you want sparser/denser
+TXH_TAU     = 0.1
+TXH_LAMBDA  = 1e-2   # L0 (soft) weight
+TXH_LR      = 1e-3
+TXH_EPOCHS  = 5
+
+class TranscoderH1toH2(pl.LightningModule):
+    def __init__(self, d_in=1024, d_lat=TXH_LATENTS, d_out=10, tau=TXH_TAU,
+                 init_theta=0.5, lambda_l0=TXH_LAMBDA, lr=TXH_LR):
+        super().__init__()
+        self.save_hyperparameters()
+        self.enc = nn.Linear(d_in, d_lat, bias=True)
+        self.theta_h = nn.Parameter(torch.full((d_lat,), init_theta))
+        self.dec = nn.Linear(d_lat, d_out, bias=True)
+        self.tau = tau
+    def forward(self, h1):
+        u = self.enc(h1)
+        soft = torch.sigmoid((u - self.theta_h)/self.tau)
+        hard = (u > self.theta_h).float()
+        gate = (hard - soft).detach() + soft
+        f = u * gate
+        h2_hat_n = self.dec(f)             # predicts normalized h2
+        return h2_hat_n, f, u, soft, hard
+    def _step(self, batch):
+        h1, h2_tgt_n = (t.to(self.device) for t in batch)
+        h2_hat_n, f, u, soft, hard = self(h1)
+        recon = F.mse_loss(h2_hat_n, h2_tgt_n, reduction="mean")
+        l0_soft = soft.sum(dim=1).mean()
+        loss = recon + self.hparams.lambda_l0 * l0_soft
+        l0_hard = hard.sum(dim=1).float().mean().detach()
+        return loss, recon.detach(), l0_soft.detach(), l0_hard
+    def training_step(self, batch, _):
+        loss, recon, l0s, l0h = self._step(batch)
+        self.log_dict({"train/recon_mse":recon, "train/l0_soft":l0s, "train/l0_hard":l0h}, prog_bar=True)
+        return loss
+    def validation_step(self, batch, _):
+        _, recon, l0s, l0h = self._step(batch)
+        self.log_dict({"val/recon_mse":recon, "val/l0_soft":l0s, "val/l0_hard":l0h}, prog_bar=True)
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+
+T_h1h2 = TranscoderH1toH2(d_in=H1_tr.shape[1], d_out=H2_tr.shape[1])
+_tr = _trainer(TXH_EPOCHS)
+_tr.fit(T_h1h2, dl_h_tr, dl_h_va)
+
+
+# Cell 32 — Metrics: MSE (normalized/raw) + L0 on VAL
+
+@torch.no_grad()
+def mse_over_pairs(T, H1, H2_raw, mu, std, bs=2048):
+    T.eval().to(device)
+    tot_n=tot_r=0.0; cnt_n=cnt_r=0
+    for i in range(0, H1.size(0), bs):
+        h1  = H1[i:i+bs].to(device)
+        h2r = H2_raw[i:i+bs].to(device)
+        h2n = (h2r - mu.to(device)) / (std.to(device) + 1e-8)
+        h2hat_n, *_ = T(h1)
+        # normalized MSE
+        diff_n = h2hat_n - h2n
+        tot_n += diff_n.pow(2).sum().item(); cnt_n += diff_n.numel()
+        # raw MSE (de-normalize)
+        h2hat_r = h2hat_n * (std.to(device)+1e-8) + mu.to(device)
+        diff_r = h2hat_r - h2r
+        tot_r += diff_r.pow(2).sum().item(); cnt_r += diff_r.numel()
+    return tot_n/cnt_n, tot_r/cnt_r
+
+tr_mse_n, tr_mse_r = mse_over_pairs(T_h1h2, H1_tr, H2_tr, mu_h2, std_h2)
+va_mse_n, va_mse_r = mse_over_pairs(T_h1h2, H1_va, H2_va, mu_h2, std_h2)
+te_mse_n, te_mse_r = mse_over_pairs(T_h1h2, H1_te, H2_te, mu_h2, std_h2)
+
+print(f"[T(h1)->h2 MSE — normalized] train={tr_mse_n:.6f} | val={va_mse_n:.6f} | test={te_mse_n:.6f}")
+print(f"[T(h1)->h2 MSE — raw]        train={tr_mse_r:.6f}  | val={va_mse_r:.6f}  | test={te_mse_r:.6f}")
+
+@torch.no_grad()
+def l0_stats(T, H1, bs=4096):
+    T.eval().to(device)
+    acts=[]
+    for i in range(0, H1.size(0), bs):
+        h1 = H1[i:i+bs].to(device)
+        _, _, u, _, _ = T(h1)
+        acts.append((u > T.theta_h).float().sum(dim=1).cpu())
+    a = torch.cat(acts, 0)
+    return float(a.mean()), float(a.median()), float(a.quantile(0.95))
+
+l0_mean, l0_med, l0_p95 = l0_stats(T_h1h2, H1_va)
+print(f"[T(h1)->h2 L0 — VAL] mean={l0_mean:.2f} | median={l0_med:.2f} | p95={l0_p95:.2f}")
+
+
+# Cell 33 — Functional check: CE/Acc using h2_hat (raw) as logits
+# This measures how well T replaces the final linear layer of modelA.
+
+@torch.no_grad()
+def ce_acc_from_h1_with_T(H1, Y, T, mu, std, bs=2048):
+    T.eval().to(device)
+    ce_sum=0.0; correct=0; seen=0
+    for i in range(0, H1.size(0), bs):
+        h1 = H1[i:i+bs].to(device)
+        y  = Y[i:i+bs].to(device).long()
+        h2hat_n, *_ = T(h1)
+        h2hat_r = h2hat_n * (std.to(device)+1e-8) + mu.to(device)  # raw logits
+        ce_sum += F.cross_entropy(h2hat_r, y, reduction="sum").item()
+        correct += (h2hat_r.argmax(dim=1) == y).sum().item()
+        seen += y.numel()
+    return ce_sum/max(seen,1), correct/max(seen,1)
+
+# Baseline logits from modelA (for reference)
+@torch.no_grad()
+def ce_acc_modelA_from_x(model, loader):
+    ce, acc = ce_and_acc_over_img_loader(model, loader, device=device)
+    return ce, acc
+
+ceA_val, accA_val = ce_acc_modelA_from_x(modelA, dl_val_tx)
+ceA_te,  accA_te  = ce_acc_modelA_from_x(modelA, dl_test_tx)
+
+ceT_val, accT_val = ce_acc_from_h1_with_T(H1_va, Y_va, T_h1h2, mu_h2, std_h2)
+ceT_te,  accT_te  = ce_acc_from_h1_with_T(H1_te, Y_te, T_h1h2, mu_h2, std_h2)
+
+print("Functional fidelity T(h1)->h2 (same MLP)")
+print(f"VAL  | CE base {ceA_val:.4f} | CE T {ceT_val:.4f} | ΔCE {ceT_val - ceA_val:+.4f} | Acc base {accA_val:.4f} | Acc T {accT_val:.4f} | ΔAcc {accT_val - accA_val:+.4f}")
+print(f"TEST | CE base {ceA_te:.4f}  | CE T {ceT_te:.4f}  | ΔCE {ceT_te - ceA_te:+.4f}  | Acc base {accA_te:.4f}  | Acc T {accT_te:.4f}  | ΔAcc {accT_te - accA_te:+.4f}")
+
+
+# Cell 34: Generate string reversal dataset
+VOCAB = list("abcd")
+BOS = "BOS"
+PAD = "<PAD>"
+MAX_LEN = 5
+
+stoi = {tok: i for i, tok in enumerate([BOS, PAD] + VOCAB)}
+itos = {i: tok for tok, i in stoi.items()}
+
+def generate_example():
+    seq = np.random.choice(VOCAB, size=np.random.randint(2, MAX_LEN+1)).tolist()
+    return [BOS] + seq, [BOS] + seq[::-1]
+
+def encode(seq, max_len=MAX_LEN+1):
+    ids = [stoi[t] for t in seq]
+    while len(ids) < max_len:  # pad
+        ids.append(stoi[PAD])
+    return ids
+
+N_SAMPLES = 2000
+data = [generate_example() for _ in range(N_SAMPLES)]
+inputs, targets = zip(*data)
+
+inputs_toks = torch.tensor([encode(seq) for seq in inputs])
+targets_toks = torch.tensor([encode(seq) for seq in targets])
+
+print("Input shape:", inputs_toks.shape, "Target shape:", targets_toks.shape)
+
+
+# Cell 35: Tokenize sequences with padding
+PAD = "<PAD>"
+stoi = {tok: i for i, tok in enumerate([BOS, PAD] + VOCAB)}
+itos = {i: tok for tok, i in stoi.items()}
+
+def encode(seq, max_len=MAX_LEN+1):  # +1 for BOS
+    seq_ids = [stoi[t] for t in seq]
+    # pad with PAD token
+    while len(seq_ids) < max_len:
+        seq_ids.append(stoi[PAD])
+    return seq_ids
+
+def decode(seq):
+    return [itos[i] for i in seq if itos[i] != PAD]
+
+inputs_toks = torch.tensor([encode(seq) for seq in inputs])
+targets_toks = torch.tensor([encode(seq) for seq in targets])
+
+print("Tokenized input shape:", inputs_toks.shape)
+print("Tokenized target shape:", targets_toks.shape)
+print("Example decoded input:", decode(inputs_toks[0].tolist()))
+print("Example decoded target:", decode(targets_toks[0].tolist()))
+
+
+# Cell 35A: Build reversal Transformer with vocab aligned to tokenizer
+from transformer_lens import HookedTransformer, HookedTransformerConfig
+from tracr.rasp import rasp
+from tracr.compiler import compiling
+
+def build_program(name="reverse"):
+    if name == "reverse":
+        def make_length():
+            all_true = rasp.Select(rasp.tokens, rasp.tokens, rasp.Comparison.TRUE)
+            return rasp.SelectorWidth(all_true)
+        length = make_length()
+        opp_index = length - rasp.indices - 1
+        flip = rasp.Select(rasp.indices, opp_index, rasp.Comparison.EQ)
+        return rasp.Aggregate(flip, rasp.tokens)
+    else:
+        same_index = rasp.Select(rasp.indices, rasp.indices, rasp.Comparison.EQ)
+        return rasp.Aggregate(same_index, rasp.tokens)
+
+program = build_program("reverse")
+model = compiling.compile_rasp_to_model(
+    program,
+    vocab=set(stoi.values()),  # match tokenizer
+    max_seq_len=MAX_LEN+1,
+    compiler_bos=BOS,
+)
+
+cfg = HookedTransformerConfig(
+    n_layers=model.model_config.num_layers,
+    d_model=model.params["token_embed"]["embeddings"].shape[1],
+    d_head=model.model_config.key_size,
+    d_mlp=model.model_config.mlp_hidden_size,
+    n_heads=model.model_config.num_heads,
+    n_ctx=model.params["pos_embed"]["embeddings"].shape[0],
+    d_vocab=len(stoi),
+    d_vocab_out=len(stoi),
+    act_fn="relu",
+    attention_dir="causal" if model.model_config.causal else "bidirectional",
+    normalization_type="LN" if model.model_config.layer_norm else None,
+)
+tl_model = HookedTransformer(cfg)
+print("tl_model built for reversal")
+
+
+# Cell 36: Run model with cache
+_, cache = tl_model.run_with_cache(inputs_toks.to(device))
+print("Cache keys:", list(cache.keys())[:8])
+
+
+# Cell 37: Extract activations (residual stream, last layer)
+layer = tl_model.cfg.n_layers - 1
+acts = cache["resid_post", layer].detach().cpu().float()
+acts = acts.reshape(-1, acts.shape[-1])
+print("Acts shape:", acts.shape)
+
+dl_sae = DataLoader(TensorDataset(acts), batch_size=BATCH_SAE, shuffle=True)
+
+
+# Cell 38: SAE (JumpReLU style)
+class SAE(nn.Module):
+    def __init__(self, d_in, d_hidden):
+        super().__init__()
+        self.enc = nn.Linear(d_in, d_hidden, bias=False)
+        self.theta = nn.Parameter(torch.full((d_hidden,), INIT_THETA))
+        self.dec = nn.Linear(d_hidden, d_in, bias=False)
+
+    def forward(self, x):
+        u = self.enc(x)
+        # Straight-Through Estimator for JumpReLU
+        soft = torch.sigmoid((u - self.theta) / TAU)
+        hard = (u > self.theta).float()
+        gate = (hard - soft).detach() + soft
+        h = u * gate
+        return self.dec(h), h
+
+
+# Cell 39: Train SAE
+sae = SAE(d_in=acts.shape[-1], d_hidden=SAE_LATENTS).to(device)
+opt = torch.optim.Adam(sae.parameters(), lr=LR_SAE_FINAL)
+for epoch in range(EPOCHS_SAE_FINAL):
+    for (batch,) in dl_sae:
+        batch = batch.to(device)
+        recon, _ = sae(batch)
+        loss = F.mse_loss(recon, batch)
+        opt.zero_grad(); loss.backward(); opt.step()
+    print(f"Epoch {epoch+1}: loss={loss.item():.4f}")
+
+
+# Cell 40: Inspect SAE
+sample, = next(iter(dl_sae))
+recon, h = sae(sample.to(device))
+print("Input shape:", sample.shape)
+print("Hidden sparsity avg:", h.sum(-1).float().mean().item())
